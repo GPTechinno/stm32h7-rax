@@ -5,9 +5,11 @@
 //! first access to each is reported in [`Peripherals::log`], with the PC
 //! that made it.
 
+pub mod dsi;
 pub mod eth;
 pub mod fmc;
 pub mod gpio;
+pub mod ltdc;
 pub mod quadspi;
 pub mod rcc;
 pub mod regfile;
@@ -18,9 +20,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
+use dsi::Dsi;
 use eth::Eth;
 use fmc::Fmc;
 use gpio::Gpio;
+use ltdc::Ltdc;
 use quadspi::{NorFlash, Quadspi};
 use rcc::{Pwr, Rcc};
 use regfile::RegFile;
@@ -64,6 +68,8 @@ const TIMERS: [(u32, bool, bool, Option<u16>); 14] = [
     (0x4001_4800, false, true, Some(118)), // TIM17
 ];
 
+const DSI_BASE: u32 = 0x5000_0000;
+const LTDC_BASE: u32 = 0x5000_1000;
 const ETH_BASE: u32 = 0x4002_8000;
 const ETH_SIZE: u32 = 0x1400;
 const RNG_BASE: u32 = 0x4802_1800;
@@ -83,6 +89,7 @@ const IDCODE: u32 = 0x2003_6450;
 
 pub const IRQ_ETH: u16 = 61;
 pub const IRQ_RNG: u16 = 80;
+pub const IRQ_LTDC: u16 = 88;
 
 /// SYSCFG_CCCSR: READY (bit 8) follows EN (bit 0).
 const SYSCFG_CCCSR: u32 = 0x20;
@@ -103,6 +110,8 @@ pub struct Peripherals {
     pub fmc: Fmc,
     pub quadspi: Quadspi,
     pub eth: Eth,
+    pub ltdc: Ltdc,
+    pub dsi: Dsi,
     /// The other blocks of 1 KB, by base address.
     pub other: BTreeMap<u32, RegFile>,
     /// First accesses to registers not modelled, and the traced accesses.
@@ -131,22 +140,27 @@ impl Peripherals {
             fmc: Fmc::new(),
             quadspi: Quadspi::new(qspi_flash),
             eth: Eth::new(),
+            ltdc: Ltdc::new(),
+            dsi: Dsi::new(),
             other: BTreeMap::new(),
             log: Vec::new(),
             trace: None,
         }
     }
 
-    /// Advances the timers to `now`; returns the time of their next event.
+    /// Advances the timers and the LTDC to `now`; returns the time of their
+    /// next event.
     pub fn update(&mut self, now: u64) -> Option<u64> {
         let apb1 = self.rcc.timer_clock(false);
         let apb2 = self.rcc.timer_clock(true);
+        let ltdc = self.ltdc.update(now, self.rcc.ltdc_clock());
         self.timers
             .iter_mut()
             .filter_map(|t| {
                 t.update(now, if t.apb2 { apb2 } else { apb1 });
                 t.next_event()
             })
+            .chain(ltdc)
             .min()
     }
 
@@ -163,6 +177,9 @@ impl Peripherals {
         }
         if self.rng.irq() {
             lines.push(IRQ_RNG);
+        }
+        if self.ltdc.irq() {
+            lines.push(IRQ_LTDC);
         }
         lines
     }
@@ -223,6 +240,10 @@ impl Peripherals {
             return Some(self.timers[i].read(address & 0x3FF, size, now));
         }
         Some(match address {
+            a if (DSI_BASE..DSI_BASE + 0x1000).contains(&a) => self.dsi.read(a - DSI_BASE, size),
+            a if (LTDC_BASE..LTDC_BASE + 0x1000).contains(&a) => {
+                self.ltdc.read(a - LTDC_BASE, size, now)
+            }
             a if (ETH_BASE..ETH_BASE + ETH_SIZE).contains(&a) => self.eth.read(a - ETH_BASE, size),
             a if (RNG_BASE..RNG_BASE + 0x400).contains(&a) => self.rng.read(a - RNG_BASE, size),
             a if (FLASH_BASE..FLASH_BASE + 0x1000).contains(&a) => {
@@ -276,6 +297,12 @@ impl Peripherals {
             return true;
         }
         match address {
+            a if (DSI_BASE..DSI_BASE + 0x1000).contains(&a) => {
+                self.dsi.write(a - DSI_BASE, size, value)
+            }
+            a if (LTDC_BASE..LTDC_BASE + 0x1000).contains(&a) => {
+                self.ltdc.write(a - LTDC_BASE, size, value, now)
+            }
             a if (ETH_BASE..ETH_BASE + ETH_SIZE).contains(&a) => {
                 self.eth.write(a - ETH_BASE, size, value)
             }

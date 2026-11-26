@@ -22,6 +22,7 @@ use bus::Bus;
 pub use bus::{FLASH_BASE, FLASH_SIZE};
 
 use crate::devices::eth::{DmaDone, DmaJob, RI, TI, fcs};
+use crate::devices::ltdc::Frame;
 use crate::devices::quadspi::NorFlash;
 use crate::devices::{Clock, Peripherals};
 
@@ -252,6 +253,14 @@ impl Stm32h7 {
                 nvic.set_pending(irq);
             }
         }
+    }
+
+    /// The LTDC's picture, composed from the frame buffers in memory; `None`
+    /// while the LTDC is off.
+    pub fn ltdc_frame(&self) -> Option<Frame> {
+        let composition = self.periph().ltdc.composition()?;
+        let memory = self.cpu.memory();
+        Some(composition.compose(&mut |address, buf| memory.read(u64::from(address), buf).is_ok()))
     }
 
     /// The bytes waiting in RTT up buffer `channel` of the control block at

@@ -11,6 +11,7 @@ const CFGR: u32 = 0x10;
 const D1CFGR: u32 = 0x18;
 const D2CFGR: u32 = 0x1C;
 const PLLCKSELR: u32 = 0x28;
+const PLLCFGR: u32 = 0x2C;
 const PLL1DIVR: u32 = 0x30;
 const PLL2DIVR: u32 = 0x38;
 const PLL3DIVR: u32 = 0x40;
@@ -33,7 +34,7 @@ impl Rcc {
                 (CR, 0x0000_0025),
                 // DIVM1..3 = 32
                 (PLLCKSELR, 0x0202_0200),
-                (0x2C, 0x01FF_0000),
+                (PLLCFGR, 0x01FF_0000),
                 // DIVN = 129, DIVP = DIVQ = DIVR = 2
                 (PLL1DIVR, 0x0101_0280),
                 (PLL2DIVR, 0x0101_0280),
@@ -108,8 +109,9 @@ impl Rcc {
         HSI_HZ >> ((self.regs.get(CR) >> 3) & 3)
     }
 
-    /// The output P of PLL `n` (1 to 3), 0 when off.
-    fn pll_p(&self, n: u32) -> u64 {
+    /// The VCO of PLL `n` (1 to 3) divided by its output divider at `shift`
+    /// in PLLxDIVR (9: P, 16: Q, 24: R); 0 when off.
+    fn pll_output(&self, n: u32, shift: u32) -> u64 {
         let cr = self.regs.get(CR);
         if cr & (1 << (22 + 2 * n)) == 0 {
             return 0;
@@ -124,11 +126,25 @@ impl Rcc {
         let m = u64::from((sel >> (4 + 8 * (n - 1))) & 0x3F);
         let divr = self.regs.get(PLL1DIVR + 8 * (n - 1));
         let multiplier = u64::from((divr & 0x1FF) + 1);
-        let p = u64::from(((divr >> 9) & 0x7F) + 1);
+        let divider = u64::from(((divr >> shift) & 0x7F) + 1);
         if m == 0 {
             return 0;
         }
-        source * multiplier / m / p
+        source * multiplier / m / divider
+    }
+
+    /// The output P of PLL `n` (1 to 3), 0 when off.
+    fn pll_p(&self, n: u32) -> u64 {
+        self.pll_output(n, 9)
+    }
+
+    /// The LTDC's pixel clock, `pll3_r_ck`: 0 while PLL3 or its output R
+    /// (PLLCFGR.DIVR3EN) is off.
+    pub fn ltdc_clock(&self) -> u64 {
+        if self.regs.get(PLLCFGR) & (1 << 24) == 0 {
+            return 0;
+        }
+        self.pll_output(3, 24)
     }
 
     /// SYSCLK, from SW.
