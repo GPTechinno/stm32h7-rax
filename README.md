@@ -42,10 +42,11 @@ inputs and outputs, the QSPI flash bytes, the Ethernet frames, the device on the
 | Part | Status |
 |---|---|
 | Memories | flash (2 MB, written only by loading), ITCM, DTCM, AXI SRAM, SRAM1-4, backup SRAM, system memory with the unique ID and the flash size, external RAMs |
-| RCC, PWR | registers kept, ready flags following their enables, PLL source and dividers protected while their PLL runs, the clock tree (SYSCLK, CPU, AHB, APB timer clocks, the LTDC's PLL3 R) computed from them |
+| RCC, PWR | registers kept, ready flags following their enables, PLL source and dividers protected while their PLL runs, the clock tree (SYSCLK, CPU, AHB, APB timer clocks, the LTDC's PLL3 R) computed from them; the reset flags (RSR, C1_RSR) of a power-on until the board sets those of another reset, cleared by RMVF |
 | GPIO A-K | modes, outputs (ODR, BSRR), alternate functions; inputs from the board |
 | TIM1-8, 12-17 | up-counting from the kernel clock and prescaler, update and compare flags, one interrupt line each (TIM1 and TIM8 without) |
 | RNG | always ready, xorshift words |
+| IWDG1 | the watchdog's counter on the 32 kHz LSI through its prescaler, reloads, window, unlock key; when it runs out (or a reload comes outside the window) `run_for` stops with `Event::WatchdogReset`, for the board to restart the chip |
 | FMC | registers kept, SDRAM controller never busy, commands recorded |
 | QUADSPI | indirect, memory-mapped and auto-polling modes; a serial NOR flash with the MT25Q commands (single or two chips in dual-flash mode), reporting programs without write enable, bits set back to 1, page wraps |
 | ETH | MAC registers, MDIO to the board's PHY, DMA with the normal descriptors (buffer 1), the FCS appended to received frames |

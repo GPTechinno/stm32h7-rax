@@ -65,6 +65,10 @@ pub enum Event {
     /// An instruction the core reports instead of taking a fault: undefined
     /// or unimplemented, a bus error, a lockup.
     Fault { pc: u32, message: String },
+    /// IWDG1 resets the system: its counter reached zero, or it was reloaded
+    /// outside its window. The board restarts the chip, keeping what its
+    /// memories keep, with the flags of [`RESET_IWDG1`](crate::devices::rcc::RESET_IWDG1).
+    WatchdogReset { pc: u32 },
 }
 
 pub struct Stm32h7 {
@@ -230,6 +234,9 @@ impl Stm32h7 {
                 .now
                 .store(self.now, std::sync::atomic::Ordering::Relaxed);
             self.service();
+            if self.periph().iwdg.expired {
+                return Some(Event::WatchdogReset { pc: self.pc() });
+            }
         }
         None
     }

@@ -2,7 +2,8 @@
 //! following their enables at once (oscillators, PLLs, voltage scaling) and
 //! the clock tree computed from them (RM0399 section 8). The PLL source and
 //! dividers keep their value while their PLL runs, as the RCC ignores those
-//! writes.
+//! writes. The reset flags (RSR, and C1_RSR for the Cortex-M7) are those of a
+//! power-on until the board sets others; RMVF clears them.
 
 use super::regfile::RegFile;
 
@@ -17,6 +18,23 @@ const PLL2DIVR: u32 = 0x38;
 const PLL3DIVR: u32 = 0x40;
 const BDCR: u32 = 0x70;
 const CSR: u32 = 0x74;
+const RSR: u32 = 0xD0;
+const C1_RSR: u32 = 0x130;
+const RMVF: u32 = 1 << 16;
+const CPURSTF: u32 = 1 << 17;
+const D1RSTF: u32 = 1 << 19;
+const D2RSTF: u32 = 1 << 20;
+const BORRSTF: u32 = 1 << 21;
+const PINRSTF: u32 = 1 << 22;
+const PORRSTF: u32 = 1 << 23;
+const IWDG1RSTF: u32 = 1 << 26;
+
+/// The reset flags of a power-on.
+pub const RESET_POWER_ON: u32 = CPURSTF | D1RSTF | D2RSTF | BORRSTF | PINRSTF | PORRSTF;
+/// Those of a reset by the NRST pin (the board's RESET button).
+pub const RESET_PIN: u32 = CPURSTF | PINRSTF;
+/// Those of a reset by IWDG1, which also pulls NRST.
+pub const RESET_IWDG1: u32 = CPURSTF | PINRSTF | IWDG1RSTF;
 
 const HSI_HZ: u64 = 64_000_000;
 const CSI_HZ: u64 = 4_000_000;
@@ -24,6 +42,7 @@ const CSI_HZ: u64 = 4_000_000;
 pub struct Rcc {
     regs: RegFile,
     hse_hz: u64,
+    reset_flags: u32,
 }
 
 impl Rcc {
@@ -41,7 +60,19 @@ impl Rcc {
                 (PLL3DIVR, 0x0101_0280),
             ]),
             hse_hz: u64::from(hse_hz),
+            reset_flags: RESET_POWER_ON,
         }
+    }
+
+    /// The reset flags RSR reads.
+    pub fn reset_flags(&self) -> u32 {
+        self.reset_flags
+    }
+
+    /// Sets the reset flags, for a chip the board has just reset: those of
+    /// the reset, with those the firmware had not cleared.
+    pub fn set_reset_flags(&mut self, flags: u32) {
+        self.reset_flags = flags;
     }
 
     pub fn read(&mut self, offset: u32, size: u32) -> u32 {
@@ -72,12 +103,19 @@ impl Rcc {
                 let csr = self.regs.get(CSR);
                 csr | ((csr & 1) << 1)
             }
+            RSR | C1_RSR => self.reset_flags,
             _ => return self.regs.read(offset, size),
         };
         super::regfile::sub_read(word, offset, size)
     }
 
     pub fn write(&mut self, offset: u32, size: u32, value: u32) {
+        if matches!(offset & !3, RSR | C1_RSR) {
+            if super::regfile::sub_write(0, offset, size, value) & RMVF != 0 {
+                self.reset_flags = 0;
+            }
+            return;
+        }
         let old = self.regs.get(offset);
         let new = super::regfile::sub_write(old, offset, size, value);
         let on = |n: u32| self.regs.get(CR) & (1 << (22 + 2 * n)) != 0;
@@ -254,5 +292,21 @@ impl Pwr {
 impl Default for Pwr {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_reset_flags_read_at_both_addresses_until_rmvf_clears_them() {
+        let mut rcc = Rcc::new(25_000_000);
+        assert_eq!(rcc.read(RSR, 4), RESET_POWER_ON);
+        assert_eq!(rcc.read(C1_RSR, 4), RESET_POWER_ON);
+        rcc.write(C1_RSR, 4, RMVF);
+        assert_eq!(rcc.read(RSR, 4), 0);
+        rcc.set_reset_flags(RESET_IWDG1);
+        assert_ne!(rcc.read(RSR, 4) & IWDG1RSTF, 0);
     }
 }

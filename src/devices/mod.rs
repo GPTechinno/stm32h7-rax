@@ -9,6 +9,7 @@ pub mod dsi;
 pub mod eth;
 pub mod fmc;
 pub mod gpio;
+pub mod iwdg;
 pub mod ltdc;
 pub mod quadspi;
 pub mod rcc;
@@ -24,6 +25,7 @@ use dsi::Dsi;
 use eth::Eth;
 use fmc::Fmc;
 use gpio::Gpio;
+use iwdg::Iwdg;
 use ltdc::Ltdc;
 use quadspi::{NorFlash, Quadspi};
 use rcc::{Pwr, Rcc};
@@ -78,6 +80,7 @@ const FMC_BASE: u32 = 0x5200_4000;
 const QUADSPI_BASE: u32 = 0x5200_5000;
 const EXTI_BASE: u32 = 0x5800_0000;
 const SYSCFG_BASE: u32 = 0x5800_0400;
+const IWDG1_BASE: u32 = 0x5800_4800;
 const GPIO_BASE: u32 = 0x5802_0000;
 const GPIO_PORTS: usize = 11;
 const RCC_BASE: u32 = 0x5802_4400;
@@ -107,6 +110,7 @@ pub struct Peripherals {
     /// Indexed like `TIMERS`.
     pub timers: Vec<Timer>,
     pub rng: Rng,
+    pub iwdg: Iwdg,
     pub fmc: Fmc,
     pub quadspi: Quadspi,
     pub eth: Eth,
@@ -137,6 +141,7 @@ impl Peripherals {
                 .map(|&(_, wide, apb2, _)| Timer::new(wide, apb2))
                 .collect(),
             rng: Rng::new(seed),
+            iwdg: Iwdg::new(),
             fmc: Fmc::new(),
             quadspi: Quadspi::new(qspi_flash),
             eth: Eth::new(),
@@ -148,12 +153,13 @@ impl Peripherals {
         }
     }
 
-    /// Advances the timers and the LTDC to `now`; returns the time of their
-    /// next event.
+    /// Advances the timers, the LTDC and the watchdog to `now`; returns the
+    /// time of their next event.
     pub fn update(&mut self, now: u64) -> Option<u64> {
         let apb1 = self.rcc.timer_clock(false);
         let apb2 = self.rcc.timer_clock(true);
         let ltdc = self.ltdc.update(now, self.rcc.ltdc_clock());
+        let iwdg = self.iwdg.update(now);
         self.timers
             .iter_mut()
             .filter_map(|t| {
@@ -161,6 +167,7 @@ impl Peripherals {
                 t.next_event()
             })
             .chain(ltdc)
+            .chain(iwdg)
             .min()
     }
 
@@ -246,6 +253,9 @@ impl Peripherals {
             }
             a if (ETH_BASE..ETH_BASE + ETH_SIZE).contains(&a) => self.eth.read(a - ETH_BASE, size),
             a if (RNG_BASE..RNG_BASE + 0x400).contains(&a) => self.rng.read(a - RNG_BASE, size),
+            a if (IWDG1_BASE..IWDG1_BASE + 0x400).contains(&a) => {
+                self.iwdg.read(a - IWDG1_BASE, size)
+            }
             a if (FLASH_BASE..FLASH_BASE + 0x1000).contains(&a) => {
                 self.flash.read(a - FLASH_BASE, size)
             }
@@ -308,6 +318,9 @@ impl Peripherals {
             }
             a if (RNG_BASE..RNG_BASE + 0x400).contains(&a) => {
                 self.rng.write(a - RNG_BASE, size, value)
+            }
+            a if (IWDG1_BASE..IWDG1_BASE + 0x400).contains(&a) => {
+                self.iwdg.write(a - IWDG1_BASE, value, now)
             }
             a if (FLASH_BASE..FLASH_BASE + 0x1000).contains(&a) => {
                 self.flash.write(a - FLASH_BASE, size, value)
