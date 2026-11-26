@@ -53,6 +53,7 @@ inputs and outputs, the QSPI flash bytes, the Ethernet frames, the device on the
 | LTDC | timings, two layers behind their shadow registers (reloaded at once or at the first line after the active area, from the PLL3 R pixel clock), the reload interrupt, the current position; the picture composed from the frame buffers (every pixel format, CLUT, constant and pixel alpha blending over the background) |
 | DSI host | wrapper regulator and PLL ready once enabled, the D-PHY in its stop state, generic packets to the board's device on the link (long packets from the payload FIFO, read answers to the payload read FIFO), whether video mode streams the LTDC |
 | Others | registers that keep what is written; the first access to each is logged with its PC |
+| Host functions | a function of the firmware run by the host (`Stm32h7::host_function`, a `HostFunction`): its first three calls run on the core, which measures their cycles and checks the host's results; then the host does its work and the core returns to its caller, charged the cycles measured, so virtual time stays the core's |
 
 Not modelled: the Cortex-M4 core, caches (identified, maintenance has no effect), the MPU (stored, not
 enforced), DMA controllers and DMA2D, the LTDC's line interrupt and color keying, the DSI host's

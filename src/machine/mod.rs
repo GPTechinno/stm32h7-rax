@@ -7,6 +7,13 @@
 //! timers advance, their interrupt lines reach the NVIC (as levels: an
 //! interrupt is pended while its line is high and it is neither pending nor
 //! active), and the Ethernet DMA moves its frames.
+//!
+//! A function of the firmware can run on the host instead
+//! ([`Stm32h7::host_function`]): its first calls run on the core, which
+//! measures their cycles and checks the host's results against its own; then
+//! the host does its work, the core returns to its caller, and the time
+//! charged is the cycles measured, so virtual time is what the core would
+//! have taken.
 
 mod bus;
 
@@ -28,6 +35,46 @@ use crate::devices::{Clock, Peripherals};
 
 /// Instructions between two looks at the peripherals.
 const SLICE: u32 = 256;
+/// Calls of a host function the core runs first, to measure its cycles (the
+/// fewest of them, an interrupt in one lengthening it) and check the host.
+const MEASURED: usize = 3;
+
+/// A function of the firmware the host can run in the core's place, reading
+/// its arguments from the core's registers and memory and writing its results
+/// there.
+pub trait HostFunction: Send {
+    /// Does the function's work on the host, at its entry.
+    fn run(&mut self, cpu: &mut CortexMCpu);
+    /// At the entry of a call the core is about to run: keeps what the host
+    /// makes of it, for [`HostFunction::matches`].
+    fn expect(&mut self, cpu: &CortexMCpu);
+    /// Once that call has returned: whether the core's results are the ones
+    /// kept by [`HostFunction::expect`].
+    fn matches(&mut self, cpu: &CortexMCpu) -> bool;
+}
+
+struct Hosted {
+    entry: u32,
+    name: String,
+    function: Box<dyn HostFunction>,
+    /// The cycles of the calls the core ran to measure it.
+    measured: Vec<u64>,
+    /// The cycles charged for a call, once measured.
+    cost: Option<u64>,
+    /// The core runs it: the host's results differed.
+    off: bool,
+    /// Calls the host ran.
+    calls: u64,
+}
+
+/// A call of a host function the core is running, to measure it.
+struct Measuring {
+    index: usize,
+    /// Where it returns, and the stack pointer then.
+    ret: u32,
+    sp: u32,
+    instructions: u64,
+}
 const PS_PER_S: u64 = 1_000_000_000_000;
 
 /// The STM32H7's caches: 16 KB 2-way for instructions, 16 KB 4-way for
@@ -83,6 +130,8 @@ pub struct Stm32h7 {
     pub instructions: u64,
     /// Time spent asleep, picoseconds.
     pub asleep: u64,
+    hosted: Vec<Hosted>,
+    measuring: Option<Measuring>,
 }
 
 impl Stm32h7 {
@@ -133,6 +182,8 @@ impl Stm32h7 {
             next_event: None,
             instructions: 0,
             asleep: 0,
+            hosted: Vec::new(),
+            measuring: None,
         };
         machine.reset();
         Ok(machine)
@@ -196,6 +247,89 @@ impl Stm32h7 {
             .is_ok()
     }
 
+    /// Runs the firmware's function at `entry` (the Thumb bit ignored) on the
+    /// host, as `function` does it, once the core has run it [`MEASURED`]
+    /// times to measure its cycles and check the host's results; `name` is for
+    /// the notes in [`Peripherals::log`](crate::devices::Peripherals).
+    pub fn host_function(&mut self, entry: u32, name: &str, function: Box<dyn HostFunction>) {
+        self.hosted.push(Hosted {
+            entry: entry & !1,
+            name: name.into(),
+            function,
+            measured: Vec::new(),
+            cost: None,
+            off: false,
+            calls: 0,
+        });
+    }
+
+    /// The host functions: their names, the calls the host ran, and the cycles
+    /// charged for each (`None` until measured, or while the core runs it).
+    pub fn host_functions(&self) -> Vec<(String, u64, Option<u64>)> {
+        self.hosted
+            .iter()
+            .map(|h| (h.name.clone(), h.calls, h.cost.filter(|_| !h.off)))
+            .collect()
+    }
+
+    /// At `pc`, before the core steps: ends a measured call returning there,
+    /// starts measuring a host function's call, or runs one on the host (then
+    /// `true`, the core having returned and its cycles counted).
+    fn hosted_call(&mut self, pc: u32) -> bool {
+        let sp = self.cpu.get_sp() as u32;
+        if let Some(m) = &self.measuring
+            && pc == m.ret
+            && sp == m.sp
+        {
+            let m = self.measuring.take().unwrap();
+            let h = &mut self.hosted[m.index];
+            h.measured.push(self.instructions - m.instructions);
+            if !h.function.matches(&self.cpu) {
+                h.off = true;
+                let note = format!(
+                    "host function {}: results differ from the core's, the core runs it",
+                    h.name
+                );
+                self.periph().log.push(note);
+            } else if h.measured.len() == MEASURED {
+                let cost = h.measured.iter().copied().min().unwrap_or(0);
+                h.cost = Some(cost);
+                let note = format!(
+                    "host function {}: runs on the host, {cost} cycles a call",
+                    h.name
+                );
+                self.periph().log.push(note);
+            }
+        }
+        let Some(index) = self.hosted.iter().position(|h| h.entry == pc && !h.off) else {
+            return false;
+        };
+        let h = &mut self.hosted[index];
+        match h.cost {
+            Some(cost) => {
+                h.function.run(&mut self.cpu);
+                h.calls += 1;
+                let lr = self.cpu.get_lr();
+                self.cpu.set_pc(lr);
+                self.now += cost * self.ps_per_cycle;
+                self.instructions += cost;
+                true
+            }
+            None => {
+                if self.measuring.is_none() {
+                    h.function.expect(&self.cpu);
+                    self.measuring = Some(Measuring {
+                        index,
+                        ret: self.cpu.get_lr() as u32 & !1,
+                        sp,
+                        instructions: self.instructions,
+                    });
+                }
+                false
+            }
+        }
+    }
+
     /// Runs for `duration` picoseconds of virtual time, or until an event.
     pub fn run_for(&mut self, duration: u64) -> Option<Event> {
         let end = self.now.saturating_add(duration);
@@ -207,6 +341,10 @@ impl Stm32h7 {
                 self.clock
                     .pc
                     .store(pc, std::sync::atomic::Ordering::Relaxed);
+                if !self.hosted.is_empty() && self.hosted_call(pc) {
+                    slice += 1;
+                    continue;
+                }
                 match self.cpu.step() {
                     Ok(CpuExit::Wfi | CpuExit::Wfe) => {
                         let wake = target.max(self.now + self.ps_per_cycle);
@@ -434,6 +572,157 @@ mod tests {
             let done = eth_dma(memory, job);
             eth.dma_done(done);
         }
+    }
+
+    /// An ELF with `image` loaded at `at`.
+    fn elf(at: u32, image: &[u8]) -> Vec<u8> {
+        let mut f = vec![0u8; 84];
+        f[..7].copy_from_slice(b"\x7fELF\x01\x01\x01");
+        let put16 =
+            |f: &mut Vec<u8>, o: usize, v: u16| f[o..o + 2].copy_from_slice(&v.to_le_bytes());
+        let put32 =
+            |f: &mut Vec<u8>, o: usize, v: u32| f[o..o + 4].copy_from_slice(&v.to_le_bytes());
+        put16(&mut f, 16, 2); // ET_EXEC
+        put16(&mut f, 18, 40); // EM_ARM
+        put32(&mut f, 20, 1);
+        put32(&mut f, 24, at + 9);
+        put32(&mut f, 28, 52); // the program headers
+        put16(&mut f, 40, 52);
+        put16(&mut f, 42, 32);
+        put16(&mut f, 44, 1);
+        put16(&mut f, 46, 40);
+        put32(&mut f, 52, 1); // PT_LOAD
+        put32(&mut f, 56, 84);
+        put32(&mut f, 60, at);
+        put32(&mut f, 64, at);
+        put32(&mut f, 68, image.len() as u32);
+        put32(&mut f, 72, image.len() as u32);
+        put32(&mut f, 76, 5);
+        put32(&mut f, 80, 4);
+        f.extend_from_slice(image);
+        f
+    }
+
+    const COUNTER: u32 = 0x2400_0000;
+    /// The function the program calls: `ldr r2, [r0]; adds r2, #1; str r2, [r0]; bx lr`.
+    const INCREMENT: u32 = 0x0800_0020;
+
+    /// A chip whose program calls [`INCREMENT`] on the word at [`COUNTER`]
+    /// five times, then stops at a BKPT.
+    fn counting_chip() -> Stm32h7 {
+        let mut image = Vec::new();
+        image.extend_from_slice(&0x2402_0000u32.to_le_bytes()); // initial SP
+        image.extend_from_slice(&0x0800_0009u32.to_le_bytes()); // reset
+        let code: [u16; 16] = [
+            0x2024, 0x0600, // movs r0, #0x24; lsls r0, r0, #24: COUNTER
+            0x2308, 0x061B,
+            0x3321, // movs r3, #8; lsls r3, r3, #24; adds r3, #0x21: INCREMENT | 1
+            0x4798, 0x4798, 0x4798, 0x4798, 0x4798, // blx r3, five times
+            0xBE00, 0xBF00, // bkpt #0; nop
+            0x6802, 0x3201, 0x6002, 0x4770, // INCREMENT
+        ];
+        for half in code {
+            image.extend_from_slice(&half.to_le_bytes());
+        }
+        let config = Config {
+            hse_hz: 25_000_000,
+            uid: [0; 12],
+            external_ram: Vec::new(),
+            qspi_flash: Vec::new(),
+            qspi_dual: false,
+            boot_address: 0x0800_0000,
+            seed: 1,
+        };
+        Stm32h7::new(config, &elf(0x0800_0000, &image)).unwrap()
+    }
+
+    fn counter(chip: &Stm32h7) -> u32 {
+        chip.read_u32(COUNTER).unwrap()
+    }
+
+    /// [`INCREMENT`] on the host, adding `step`.
+    struct Increment {
+        step: u32,
+        expected: u32,
+    }
+
+    impl HostFunction for Increment {
+        fn run(&mut self, cpu: &mut CortexMCpu) {
+            let at = u64::from(cpu.get_gpr(0) as u32);
+            let mut word = [0; 4];
+            cpu.memory().read(at, &mut word).unwrap();
+            let value = u32::from_le_bytes(word) + self.step;
+            cpu.memory_mut().write(at, &value.to_le_bytes()).unwrap();
+        }
+
+        fn expect(&mut self, cpu: &CortexMCpu) {
+            let mut word = [0; 4];
+            cpu.memory()
+                .read(u64::from(cpu.get_gpr(0) as u32), &mut word)
+                .unwrap();
+            self.expected = u32::from_le_bytes(word) + self.step;
+        }
+
+        fn matches(&mut self, cpu: &CortexMCpu) -> bool {
+            let mut word = [0; 4];
+            cpu.memory()
+                .read(u64::from(cpu.get_gpr(0) as u32), &mut word)
+                .unwrap();
+            u32::from_le_bytes(word) == self.expected
+        }
+    }
+
+    fn run_to_breakpoint(chip: &mut Stm32h7) {
+        assert!(matches!(
+            chip.run_for(PS_PER_S),
+            Some(Event::Breakpoint { .. })
+        ));
+    }
+
+    #[test]
+    fn a_host_function_takes_the_cycles_the_core_took() {
+        let mut core = counting_chip();
+        run_to_breakpoint(&mut core);
+        let mut hosted = counting_chip();
+        hosted.host_function(
+            INCREMENT | 1,
+            "increment",
+            Box::new(Increment {
+                step: 1,
+                expected: 0,
+            }),
+        );
+        run_to_breakpoint(&mut hosted);
+        assert_eq!((counter(&core), counter(&hosted)), (5, 5));
+        // the last two calls on the host, four cycles each as measured
+        assert_eq!(
+            hosted.host_functions(),
+            vec![("increment".to_string(), 2, Some(4))]
+        );
+        assert_eq!(hosted.instructions, core.instructions);
+        assert_eq!(hosted.now(), core.now());
+    }
+
+    #[test]
+    fn a_host_function_with_other_results_is_left_to_the_core() {
+        let mut chip = counting_chip();
+        chip.host_function(
+            INCREMENT,
+            "wrong",
+            Box::new(Increment {
+                step: 2,
+                expected: 0,
+            }),
+        );
+        run_to_breakpoint(&mut chip);
+        assert_eq!(counter(&chip), 5);
+        assert_eq!(chip.host_functions(), vec![("wrong".to_string(), 0, None)]);
+        assert!(
+            chip.periph()
+                .log
+                .iter()
+                .any(|l| l.contains("results differ"))
+        );
     }
 
     #[test]

@@ -13,4 +13,6 @@
 pub mod devices;
 pub mod machine;
 
-pub use machine::{Config, Event, Stm32h7};
+pub use machine::{Config, Event, HostFunction, Stm32h7};
+/// rax, whose Cortex-M core a [`HostFunction`] reads and writes.
+pub use rax;
