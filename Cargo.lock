@@ -430,6 +430,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 [[package]]
 name = "rax"
 version = "0.1.0"
+source = "git+https://github.com/Georges760/rax?branch=feat%2Fcortex-m7-fp-data#848bce8cd468eea80a03c756f8fc0f3f251a7fff"
 dependencies = [
  "bitflags",
  "clap",

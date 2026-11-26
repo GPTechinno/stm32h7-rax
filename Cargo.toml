@@ -10,7 +10,7 @@ keywords = ["stm32h7", "stm32", "emulator", "cortex-m"]
 categories = ["emulators", "embedded", "simulation"]
 
 [dependencies]
-# rax with its Cortex-M7 additions, from a checkout of the `feat/cortex-m7` branch of
-# https://github.com/Georges760/rax; a version goes next to the path once rax is on crates.io
-rax = { path = "../../upstream/rax", default-features = false }
+# rax with its Cortex-M additions not upstream yet, from the `feat/cortex-m7-fp-data` branch of the fork;
+# a version replaces it once rax is on crates.io
+rax = { git = "https://github.com/Georges760/rax", branch = "feat/cortex-m7-fp-data", default-features = false }
 goblin = "0.10"

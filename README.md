@@ -1,17 +1,17 @@
 # stm32h7-rax
 
 STM32H7 SoC emulator in Rust. The Cortex-M7 is [rax](https://github.com/Georges760/rax)'s Cortex-M
-core (its `feat/cortex-m7` branch: the Private Peripheral Bus as memory, the Floating-point Extension
-(FPv5-D16), the reset value of VTOR), around it the memory map and the peripheral models of the
+core (its `feat/cortex-m7-fp-data` branch, our additions not upstream yet: the Private Peripheral Bus as
+memory, the Floating-point Extension (FPv5-D16), the reset value of VTOR), around it the memory map and the peripheral models of the
 STM32H747's Cortex-M7 (RM0399). Board emulators build on it: they give it the external memories, the
 QSPI flash bytes, the PHY behind MDIO, the panel on the DSI link, and see the GPIO levels, the
 Ethernet frames and the LTDC's picture.
 
 ## Building
 
-rax is not on crates.io yet, so this crate takes it by path from `../../upstream/rax`: a checkout of
-its `feat/cortex-m7` branch in an `upstream` directory beside the `emulator` directory holding this
-crate. devenv (stable Rust).
+rax is not on crates.io yet, so this crate takes it from git: the `feat/cortex-m7-fp-data` branch of
+[Georges760/rax](https://github.com/Georges760/rax). Cargo checks out the whole repository, its
+research documents included: about 3.5 GB in `~/.cargo/git`. devenv (stable Rust).
 
 ## Use
 
